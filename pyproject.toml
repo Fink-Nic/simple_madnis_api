@@ -1,0 +1,12 @@
+[project]
+requires-python = ">=3.12,<3.14"
+
+authors = [
+    { name = "Nic Fink", email = "nic.fink@students.unibe.ch" }
+]
+
+dependencies = [
+    "numpy>=2.2,<3",
+    "torch>=2.8,<3",
+    "madnis @ git+https://github.com/madgraph-ml/madnis.git@main",
+]
