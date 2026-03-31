@@ -221,7 +221,7 @@ class MadnisSampler:
         if self._use_scheduler:
             self._madnis.scheduler = self._get_scheduler(
                 n, self._scheduler_type)
-        self._madnis.train(n, self._default_callback, False)
+        self._madnis.train(n, self._default_callback, True)
 
     def get_samples(self, n_samples: int) -> MadnisSampleBatch:
         """
