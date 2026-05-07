@@ -62,17 +62,17 @@ class MadnisConfig:
     Args:
         seed:
             Random seed for reproducibility. No Stream_ID for now.
-        batch_size: 
+        batch_size:
             Number of samples per training step.
-        max_batch_size: 
+        max_batch_size:
             Maximum number of samples to generate in one forward pass when calling get_samples(). Avoids out-of-memory errors on GPU.
         learning_rate:
             Learning rate for the optimizer.
         use_scheduler:
             If true, a learning rate scheduler will be used during training.
-        scheduler_type: 
+        scheduler_type:
             Currently only supports "cosineannealing". Ignored if use_scheduler is False.
-        loss_type: 
+        loss_type:
             Loss function to optimize during training. Options are "variance", "variance_softclip", "kl_divergence", and "kl_divergence_softclip".
         discrete_dims_position:
             Whether the sampler generates the discrete points before or after the continuous.
@@ -87,7 +87,7 @@ class MadnisConfig:
     """
     seed: int = 42
     training_steps: int = 100
-    batch_size: int = 1000
+    training_batch_size: int = 1000
     max_batch_size: int = 100_000
     use_gpu: bool = True
     cuda_id: int = 1
@@ -111,7 +111,7 @@ class MadnisConfig:
         return cls(
             seed=config_dict.get("seed", 42),
             training_steps=config_dict.get("training_steps", 100),
-            batch_size=config_dict.get("batch_size", 1000),
+            training_batch_size=config_dict.get("training_batch_size", 1000),
             max_batch_size=config_dict.get("max_batch_size", 100_000),
             use_gpu=config_dict.get("use_gpu", True),
             cuda_id=config_dict.get("cuda_id", 1),
@@ -144,7 +144,8 @@ class MadnisSampler:
         pending_weights: List[NDArray] | None = None,
         pending_training_samples: List[Tensor] | None = None,
         pending_training_probs: List[Tensor] | None = None,
-        torch_rng_state: Tensor | None = None,
+        torch_cpu_rng_state: Tensor | None = None,
+        torch_gpu_rng_state: Tensor | None = None,
         madnis_blob: bytes | None = None,
     ):
         torch.set_default_dtype(torch.float64)
@@ -163,7 +164,7 @@ class MadnisSampler:
         self.step: int = step or 0
         self.last_loss: float | None = last_loss or None
 
-        self.training_target_samples = self.cfg.training_steps * self.cfg.batch_size
+        self.training_target_samples = self.cfg.training_steps * self.cfg.training_batch_size
         self.trained_samples: int = trained_samples or 0
         self.total_trained_samples: int = total_trained_samples or 0
         self.produced_batches: int = produced_batches or 0
@@ -172,10 +173,13 @@ class MadnisSampler:
         self.pending_weights: List[NDArray] = pending_weights or []
         self.pending_training_samples: List[Tensor] = pending_training_samples or []
         self.pending_training_probs: List[Tensor] = pending_training_probs or []
-        if torch_rng_state is not None:
-            torch.set_rng_state(torch_rng_state)
+        if torch_cpu_rng_state is not None:
+            if torch_gpu_rng_state is not None and self.device.type == 'cuda':
+                torch.cuda.set_rng_state(torch_gpu_rng_state)
+            torch.set_rng_state(torch_cpu_rng_state)
         else:
             torch.manual_seed(self.cfg.seed)
+            torch.cuda.manual_seed(self.cfg.seed)
         if madnis_blob is not None:
             import io
             buffer = io.BytesIO(madnis_blob)
@@ -228,8 +232,9 @@ class MadnisSampler:
                 pending_weights=state.get("pending_weights"),
                 pending_training_samples=state.get("pending_training_samples"),
                 pending_training_probs=state.get("pending_training_probs"),
-                torch_rng_state=state["torch_rng_state"],
-                madnis_blob=state["madnis_blob"]
+                torch_cpu_rng_state=state.get("torch_cpu_rng_state"),
+                torch_gpu_rng_state=state.get("torch_gpu_rng_state"),
+                madnis_blob=state.get("madnis_blob")
             )
             instance.madnis.integrand = instance._get_madnis_integrand()
             ch_remap = (
@@ -255,6 +260,9 @@ class MadnisSampler:
         if self.madnis is None:
             raise RuntimeError("MadnisSampler not properly initialized with an Integrator instance.")
 
+        if self.cfg.save_path is None:
+            return dict(Warning="No save path provided. No snapshot was created.")
+
         tmp_integrand = self.madnis.integrand
         tmp_loss = self.madnis.loss
         tmp_ch_remap = (
@@ -275,9 +283,6 @@ class MadnisSampler:
                 if hasattr(self.madnis.flow.discrete_flow, 'channel_remap_function'):
                     self.madnis.flow.discrete_flow.channel_remap_function = None
 
-            if self.cfg.save_path is None:
-                raise ValueError("MadNIS Integrator state cannot be saved because 'save_path' is not set in the config.")
-
             from pathlib import Path
             import pickle
             import io
@@ -289,7 +294,8 @@ class MadnisSampler:
                     pending_weights=self.pending_weights,
                     pending_training_samples=self.pending_training_samples,
                     pending_training_probs=self.pending_training_probs,
-                    torch_rng_state=torch.get_rng_state(),
+                    torch_cpu_rng_state=torch.get_rng_state(),
+                    torch_gpu_rng_state=torch.cuda.get_rng_state() if self.device.type == 'cuda' else None,
                     madnis_blob=buffer.getvalue(),
                 ), f)
 
@@ -320,17 +326,17 @@ class MadnisSampler:
         return snapshot
 
     def sample_plan(self) -> Dict[str, Any]:
+        n_batch_remaining = self.training_samples_remaining()
         return dict(
-            kind="MadNIS",
-            batch_hint=self.cfg.max_batch_size,
-            meta={"config": asdict(self.cfg)},
+            kind="produce",
+            nr_samples=n_batch_remaining if n_batch_remaining is not None else self.cfg.max_batch_size,
         )
 
     def training_samples_remaining(self) -> int | None:
         if self.total_trained_samples >= self.training_target_samples:
             return None
         if self.step < self.cfg.training_steps:
-            return max(self.cfg.batch_size - self.trained_samples, 0)
+            return max(self.cfg.training_batch_size - self.trained_samples, 0)
         return None
 
     def produce_latent_batch(self, nr_samples: int) -> SampleBatch:
@@ -354,6 +360,8 @@ class MadnisSampler:
             if self.training_samples_remaining() is not None:
                 self.pending_training_samples.append(x_all)
                 self.pending_training_probs.append(prob)
+                self.trained_samples += n
+                self.total_trained_samples += n
 
         self.produced_batches += 1
         self.produced_samples += nr_samples
@@ -363,13 +371,9 @@ class MadnisSampler:
     def ingest_training_values(self, training_values: NDArray) -> None:
         training_values = np.asarray(training_values)
         n_samples = training_values.shape[0]
-        if n_samples > (self.training_samples_remaining() or 0):
-            raise ValueError("Size of training values is larger than expected.")
-        self.trained_samples += n_samples
-        self.total_trained_samples += n_samples
         self.pending_weights.append(training_values)
 
-        if self.trained_samples >= self.cfg.batch_size:
+        if self.trained_samples >= self.cfg.training_batch_size:
             self._train_step()
 
     def get_diagnostics(self) -> Dict[str, Any]:
@@ -418,6 +422,7 @@ class MadnisSampler:
             cuda_id = min(self.cfg.cuda_id, torch.cuda.device_count() - 1)
             major, minor = torch.cuda.get_device_capability(cuda_id)
             if (7, 0) <= (major, minor) < (12, 0):
+                torch.cuda.set_device(cuda_id)
                 return torch.device(f'cuda:{cuda_id}')
         return torch.device('cpu')
 
@@ -446,10 +451,16 @@ class MadnisSampler:
                 return None
 
     def _train_step(self) -> None:
-        func_vals = torch.cat([torch.as_tensor(w, device=self.device, dtype=torch.float64)
-                              for w in self.pending_weights])
+        f_lens = [len(w) for w in self.pending_weights]
+        x_lens = [len(s) for s in self.pending_training_samples]
+        p_lens = [len(p) for p in self.pending_training_probs]
+        if not (f_lens == x_lens == p_lens):
+            print(
+                f"Warning: Mismatch in pending training data lengths: weights {f_lens}, samples {x_lens}, probs {p_lens}. About to shit the bed.")
+        func_vals = torch.cat([torch.from_numpy(w).to(device=self.device, dtype=torch.float64)
+                               for w in self.pending_weights])
         x_all = torch.cat(self.pending_training_samples, dim=0)
-        probs = torch.cat(self.pending_training_probs)
+        probs = torch.cat(self.pending_training_probs, dim=0)
         madnis_samples = MadnisSampleBatch(
             x=x_all,
             y=None,
@@ -473,10 +484,10 @@ class MadnisSampler:
         """
         num_disc_input = indices.shape[1]
         if num_disc_input == len(self.discrete_cardinalities):
-            return torch.zeros(indices.shape, dtype=torch.float64)
+            return torch.zeros(indices.shape, dtype=torch.float64, device=self.device)
 
         disc_dim = self.discrete_cardinalities[num_disc_input]
-        return torch.full((len(indices), disc_dim), 1.0 / disc_dim, dtype=torch.float64)
+        return torch.full((len(indices), disc_dim), 1.0 / disc_dim, dtype=torch.float64, device=self.device)
 
     def _madnis_eval(self, x_all: Tensor) -> Tensor:
         raise NotImplementedError("This should not get called, since we are sidestepping the usual training process.")
@@ -507,7 +518,7 @@ class MadnisSampler:
                 self.cfg.transformer_config if self.cfg.discrete_model == "transformer"
                 else self.cfg.made_config),
             loss=self._get_loss(),
-            batch_size=self.cfg.batch_size,
+            batch_size=self.cfg.training_batch_size,
             discrete_model=self.cfg.discrete_model,
             learning_rate=self.cfg.learning_rate,
             flow_kwargs=asdict(self.cfg.flow_config),

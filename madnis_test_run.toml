@@ -1,0 +1,67 @@
+name = "python-scalar-python-madnis-sampler-test"
+
+[evaluator]
+kind = "python_scalar"
+flake_ref = "path:./python_api/examples/python_scalar_sin#runtime"
+module = "demo_integrand"
+class = "SinIntegrand"
+continuous_dims = 2
+discrete_cardinalities = [2, 3]
+
+[evaluator.init_args]
+bias = 0.0
+freq_u = 2.0
+freq_v = 1.25
+scale = 1.0
+
+[evaluator_runner_params]
+performance_snapshot_interval_ms = 2000
+min_tick_time_ms = 50
+db_pool_size = 2
+
+[sampler_aggregator_runner_params]
+performance_snapshot_interval_ms = 2000
+min_tick_time_ms = 50
+frontend_sync_interval_ms = 2000
+db_pool_size = 10
+
+[sampler_aggregator_runner_params.queue]
+queue_buffer = 1.0
+target_batch_eval_ms = 500.0
+batch_size_deadband_ratio = 0.15
+batch_size_cooldown_ticks = 3
+pending_refill_low_ratio = 0.85
+pending_refill_high_ratio = 1.15
+max_batch_size = 100000
+local_pending_buffer_multiplier = 0.5
+max_queue_size = 200
+max_batches_per_tick = 100
+max_insert_bundle_size = 5
+max_concurrent_insert_tasks = 8
+completed_batch_fetch_limit = 100
+max_batch_retries = 3
+
+[[task_queue]]
+name = "accumulator"
+kind = "set_accumulator"
+accumulator = "scalar"
+
+[[task_queue]]
+name = "sample-a"
+kind = "sample"
+
+[task_queue.stop_condition]
+max_samples = 10000000
+
+[task_queue.sampler_aggregator.config]
+kind = "python_sampler"
+flake_ref = "path:/shared/nfink/madnis_gammaboard_api#runtime"
+module = "madnis_sampler"
+class = "MadnisSampler"
+continuous_dims = 2
+requires_training_values = true
+
+[task_queue.sampler_aggregator.config.init_args]
+seed = 0
+training_batch_size = 1000
+training_steps = 100

@@ -1,0 +1,95 @@
+{
+  description = "madnis gammaboard API - Runtime";
+
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = { self, nixpkgs, flake-utils, ... }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        pkgs = import nixpkgs {
+          inherit system;
+          config.allowUnfree = true;
+        };
+
+        libs = with pkgs; [
+          stdenv.cc.cc.lib
+          zlib
+          gmp
+          mpfr
+          libmpc
+        ];
+        envPython = pkgs.python312.withPackages (ps: with ps; [
+          pip
+          virtualenv
+          numpy
+          torch-bin
+          setuptools
+        ]);
+
+        runtimePython = pkgs.python312.withPackages (ps: with ps; [
+          pip
+          numpy
+          torch-bin
+          setuptools
+        ]);
+
+        runtime = pkgs.stdenv.mkDerivation {
+          name = "madnis-gammaboard-api-runtime";
+          src = ./.;
+          buildInputs = [ runtimePython pkgs.git ] ++ libs;
+          
+          buildPhase = ''
+            mkdir -p $out/venv
+            ${runtimePython}/bin/python -m venv --system-site-packages $out/venv
+            source $out/venv/bin/activate
+            pip install --upgrade pip
+            pip install --no-build-isolation "madnis @ git+https://github.com/madgraph-ml/madnis.git@main"
+          '';
+          
+          installPhase = ''
+            mkdir -p $out/src
+            cp -r src/* $out/src/
+            
+            # Create wrapper script
+            mkdir -p $out/bin
+            cat > $out/bin/python-madnis <<'WRAPPER'
+            #!/bin/sh
+            export PYTHONPATH="$out/src:$PYTHONPATH"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath libs}:/run/opengl-driver/lib:$LD_LIBRARY_PATH"
+            export OMP_NUM_THREADS=64
+            exec $out/venv/bin/python "$@"
+            WRAPPER
+            chmod +x $out/bin/python-madnis
+          '';
+        };
+      in
+      {
+        packages.runtime = runtime;
+        packages.default = runtime;
+
+        devShells.default = pkgs.mkShell {
+          nativeBuildInputs = [ envPython ];
+
+          buildInputs = libs;
+
+          shellHook = ''
+            if [ ! -d ".venv" ]; then
+              python -m venv --system-site-packages .venv
+            fi
+
+            source .venv/bin/activate
+
+            pip install --upgrade pip
+            pip install --no-build-isolation -e .
+
+            export PYTHONPATH="$PWD/src:$PYTHONPATH"
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath libs}:/run/opengl-driver/lib:$LD_LIBRARY_PATH"
+            export OMP_NUM_THREADS=64
+          '';
+        };
+      }
+    );
+}

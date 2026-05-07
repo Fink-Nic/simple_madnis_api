@@ -17,7 +17,7 @@ sigma = np.array([0.2, 1.0, 5.0])
 
 config = MadnisConfig(
     seed=42,
-    batch_size=1000,
+    training_batch_size=1000,
     training_steps=10,
     max_batch_size=10_000,
     save_path="madnis_blob.pt",
@@ -77,7 +77,7 @@ if __name__ == "__main__":
     # Testing exposed functionality
     ddim = [len(sigma)]
     cdim = 3
-    from_prepared = False and Path("prepared_state.pkl").exists()
+    from_prepared = True and Path("prepared_state.pkl").exists()
     init_args = asdict(config)
     sampler = MadnisSampler.from_config(discrete_cardinalities=ddim, continuous_dims=cdim, init_args=init_args)
     snapshot = sampler.snapshot()
@@ -86,6 +86,8 @@ if __name__ == "__main__":
     json.dump(snapshot, snapshot_path.open("w"))
 
     for run in range(3):
+        with snapshot_path.open("rb") as f:
+            snapshot = json.load(f)
         print("Testing import of state...")
         if from_prepared:
             snapshot["save_path"] = "prepared_state.pkl"
@@ -103,13 +105,11 @@ if __name__ == "__main__":
         print(f"Result before training: {mean} +- {std / np.sqrt(1000)}, RSD={std/mean}     TARGET: 1.0")
         sampler.ingest_training_values(res)
         print("Starting training...")
-        train(n=config.training_steps-1, batch_size=config.batch_size, sampler=sampler)
+        train(n=config.training_steps-1, batch_size=config.training_batch_size, sampler=sampler)
         samples = sampler.produce_latent_batch(sampler.training_samples_remaining() or 10000)
         res = gaussian_eval(samples.xs_discrete, samples.xs_continuous) * samples.weights
         mean, std = res.mean(), res.std()
         print(f"Result after training: {mean} +- {std / np.sqrt(1000)}, RSD={std/mean}     TARGET: 1.0")
-        with snapshot_path.open("rb") as f:
-            snapshot = json.load(f)
 
     if save_path.exists():
         save_path.unlink()  # Clean up the saved state file
